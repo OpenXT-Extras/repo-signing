@@ -1,0 +1,160 @@
+#!/bin/sh
+#
+# Copyright (c) 2011 Citrix Systems, Inc.
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+
+parse_args()
+{
+    if [ $# -ne 3 ] ; then
+        usage
+        exit 1
+    fi
+
+    START_DATE="$1"
+    END_DATE="$2"
+    CERTIFICATE_SUBJECT="$3"
+
+    echo "${START_DATE}" | grep -q '^[0-4][0-9]\{11\}Z$' ||
+        die "START_DATE not valid"
+
+    echo "${END_DATE}" | grep -q '^[0-4][0-9]\{11\}Z$' ||
+        die "END_DATE not valid"
+}
+
+usage()
+{
+    cat <<EOF
+Usage: $(basename $0) START_DATE END_DATE CERTIFICATE_SUBJECT
+  e.g. $(basename $0) 100101000000Z 491231235959Z "/CN=OpenXT repository production certificate authority/O=Example organization/C=Example"
+
+Generates an OpenXT certificate authority.
+
+Prerequisites:
+
+  - The directory keys/ca is mounted.
+  - The directory ca does not exist.
+
+Writes the new private key to keys/ca/cakey.pem. Creates the directory ca and
+writes all other files related to the certificate authority to it.
+
+EOF
+}
+
+generate_ca_cert()
+{
+    local CA_DIR="ca"
+    local CA_CERT="${CA_DIR}/cacert.pem"
+    local CA_REQ="${CA_DIR}/careq.pem"
+    local CA_KEY_DIR="keys/ca"
+    local CA_KEY="${CA_KEY_DIR}/cakey.pem"
+
+    [ ! -d "${CA_DIR}" ] ||
+        die "CA directory '${CA_DIR}' already exists"
+
+    check_mounted "${CA_KEY_DIR}" ||
+        die "private key directory '${CA_KEY_DIR}' is not mounted"
+
+    [ ! -r "${CA_KEY}" ] ||
+        die "private key '${CA_KEY}' already exists"
+
+    read_ca_passphrase
+
+    echo "Generating certificate request..." >&2
+
+    local DIR
+    for DIR in "${CA_DIR}" "${CA_DIR}/certs" "${CA_DIR}/crl" ; do
+        mkdir "${DIR}" ||
+            die "error creating directory '${DIR}'"
+    done
+
+    touch "${CA_DIR}/index.txt" ||
+        die "error creating '${CA_DIR}/index.txt'"
+
+    # Adding -nodes option would create private key without a passphrase.
+    PASSPHRASE="${CA_PASSPHRASE}" \
+        openssl req -newkey rsa:8192 \
+                    -sha256 \
+                    -subj "${CERTIFICATE_SUBJECT}" \
+                    -keyout "${CA_KEY}" \
+                    -passout "env:PASSPHRASE" \
+                    -out "${CA_REQ}" ||
+            die "error generating certificate request"
+
+    echo "Generating certificate..." >&2
+
+    PASSPHRASE="${CA_PASSPHRASE}" \
+        openssl ca -startdate "${START_DATE}" \
+                   -enddate "${END_DATE}" \
+                   -policy policy_anything \
+                   -md sha256 \
+                   -batch \
+                   -notext \
+                   -extensions v3_ca \
+                   -selfsign \
+                   -create_serial \
+                   -keyfile "${CA_KEY}" \
+                   -passin "env:PASSPHRASE" \
+                   -out "${CA_CERT}" \
+                   -infiles "${CA_REQ}" ||
+            die "error signing certificate"
+}
+
+check_mounted()
+{
+    local DIR="$1"
+
+    [ -d "${DIR}" ] || return 1
+
+    local ABSOLUTE_DIR=$(cd "${DIR}" && /bin/pwd -P)
+
+    local MOUNT_DIR
+    for MOUNT_DIR in $(cut -f2 -d' ' /proc/mounts) ; do
+        [ "${MOUNT_DIR}" = "${ABSOLUTE_DIR}" ] && return 0
+    done
+
+    return 1
+}
+
+read_ca_passphrase()
+{
+    echo "Enter new passphrase for certificate authority private key."
+
+    while true ; do
+        read -p "Passphrase (echoed to screen): " CA_PASSPHRASE
+
+        local CA_PASSPHRASE_VERIFY
+        read -p "Verify passphrase (echoed to screen): " CA_PASSPHRASE_VERIFY
+
+        [ "${CA_PASSPHRASE_VERIFY}" = "${CA_PASSPHRASE}" ] && break
+
+        echo "Passphrases do not match. Please try again."
+    done
+}
+
+die()
+{
+    echo "$(basename $0): $*" >&2
+    exit 1
+}
+
+export OPENSSL_CONF="conf/openssl.cnf"
+
+parse_args "$@"
+
+generate_ca_cert
+
+exit 0

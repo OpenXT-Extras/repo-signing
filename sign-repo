@@ -1,0 +1,123 @@
+#!/bin/sh
+#
+# Copyright (c) 2011 Citrix Systems, Inc.
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+
+parse_args()
+{
+    if [ $# -ne 2 ] ; then
+        usage
+        exit 1
+    fi
+
+    CERTIFICATE_NAME="$1"
+    REPOSITORY_DEV="$2"
+}
+
+usage()
+{
+    cat <<EOF
+Usage: $(basename $0) CERTIFICATE_NAME REPOSITORY_DEV
+  e.g. $(basename $0) xc repo
+
+Signs an OpenXT repository.
+
+Prerequisites:
+
+  - The directory keys/CERTIFICATE_NAME is mounted.
+
+Reads the XC-REPOSITORY from the first 1 MB of the device REPOSITORY_DEV.
+Writes a tar archive containing the resulting XC-SIGNATURE file back to the
+device REPOSITORY_DEV.
+
+EOF
+}
+
+read_repository()
+{
+    echo "Reading XC-REPOSITORY..." >&2
+
+    TEMP_DIR=$(mktemp -d) ||
+        die "error creating temporary directory"
+
+    local REPOSITORY_FILE="${TEMP_DIR}/XC-REPOSITORY"
+    
+    dd "if=${REPOSITORY_DEV}" "of=${REPOSITORY_FILE}" bs=1048576 count=1 ||
+        die "error reading from device '${REPOSITORY_DEV}'"
+}
+
+generate_signature()
+{
+    local CERT="certs/${CERTIFICATE_NAME}/cert.pem"
+    local KEY="keys/${CERTIFICATE_NAME}/key.pem"
+    local REPOSITORY_FILE="${TEMP_DIR}/XC-REPOSITORY"
+
+    echo "Signing repository..." >&2
+
+    [ -r "${CERT}" ] ||
+        die "error reading certificate '${CERT}'"
+
+    [ -r "${KEY}" ] ||
+        die "error reading private key '${KEY}'"
+
+    [ -r "${REPOSITORY_FILE}" ] ||
+        die "error reading repository file '${REPOSITORY_FILE}'"
+
+    read_signing_cert_passphrase
+
+    PASSPHRASE="${CERT_PASSPHRASE}" \
+        bin/sign_repo.sh "${CERT}" "${KEY}" "${TEMP_DIR}" ||
+            die "error signing repository"
+}
+
+read_signing_cert_passphrase()
+{
+    echo "Enter passphrase for signing certificate private key."
+
+    read -p "Passphrase (echoed to screen): " CERT_PASSPHRASE
+}
+
+write_signature()
+{
+    local SIGNATURE_FILE="${TEMP_DIR}/XC-SIGNATURE"
+
+    echo "Writing XC-SIGNATURE..." >&2
+
+    tar cf "${REPOSITORY_DEV}" -C "${TEMP_DIR}" "XC-SIGNATURE" ||
+        die "error writing to device '${REPOSITORY_DEV}'"
+
+    sync ||
+        die "sync failed"
+
+    rm -rf "${TEMP_DIR}"
+}
+
+die()
+{
+    echo "$(basename $0): $*" >&2
+    exit 1
+}
+
+parse_args "$@"
+
+read_repository
+
+generate_signature
+
+write_signature
+
+exit 0

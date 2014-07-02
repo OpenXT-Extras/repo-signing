@@ -1,0 +1,176 @@
+#!/bin/sh
+#
+# Copyright (c) 2011 Citrix Systems, Inc.
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+
+parse_args()
+{
+    if [ $# -ne 4 ] ; then
+        usage
+        exit 1
+    fi
+
+    CERTIFICATE_NAME="$1"
+    START_DATE="$2"
+    END_DATE="$3"
+    CERTIFICATE_SUBJECT="$4"
+
+    echo "${START_DATE}" | grep -q '^[0-4][0-9]\{11\}Z$' ||
+        die "START_DATE not valid"
+
+    echo "${END_DATE}" | grep -q '^[0-4][0-9]\{11\}Z$' ||
+        die "END_DATE not valid"
+}
+
+usage()
+{
+    cat <<EOF
+Usage: $(basename $0) CERTIFICATE_NAME START_DATE END_DATE CERTIFICATE_SUBJECT
+  e.g. $(basename $0) xc 100101000000Z 161231235959Z "/CN=OpenXT repository production signing certificate/O=Example organization/C=Example"
+
+Generates an OpenXT signing certificate.
+
+Prerequisites:
+
+  - The directory keys/ca is mounted.
+  - The directory keys/CERTIFICATE_NAME is mounted.
+  - The directory certs/CERTIFICATE_NAME does not exist.
+
+Writes the private key to keys/CERTIFICATE_NAME/key.pem. Creates the directory
+certs/CERTIFICATE_NAME and writes the certificate and certificate request to
+that directory.
+
+EOF
+}
+
+generate_signing_cert()
+{
+    local CA_DIR="ca"
+    local CA_CERT="${CA_DIR}/cacert.pem"
+    local CA_KEY_DIR="keys/ca"
+    local CA_KEY="${CA_KEY_DIR}/cakey.pem"
+
+    local CERT_DIR="certs/${CERTIFICATE_NAME}"
+    local CERT="${CERT_DIR}/cert.pem"
+    local CERT_REQ="${CERT_DIR}/req.pem"
+    local KEY_DIR="keys/${CERTIFICATE_NAME}"
+    local KEY="${KEY_DIR}/key.pem"
+
+    [ -d "${CA_DIR}" ] ||
+        die "CA directory '${CA_DIR}' does not exist"
+
+    [ -r "${CA_KEY}" ] ||
+        die "error reading CA private key '${CA_KEY}'"
+
+    [ ! -d "${CERT_DIR}" ] ||
+        die "certificate directory '${CERT_DIR}' already exists"
+
+    check_mounted "${KEY_DIR}" ||
+        die "private key directory '${KEY_DIR}' is not mounted"
+
+    [ ! -r "${KEY}" ] ||
+        die "private key '${KEY}' already exists"
+
+    read_ca_passphrase
+
+    read_signing_cert_passphrase
+
+    echo "Generating certificate request..." >&2
+
+    mkdir "${CERT_DIR}" ||
+        die "error creating directory '${CERT_DIR}'"
+
+    # Adding -nodes option would create private key without a passphrase.
+    PASSPHRASE="${CERT_PASSPHRASE}" \
+        openssl req -newkey rsa:8192 \
+                    -sha256 \
+                    -subj "${CERTIFICATE_SUBJECT}" \
+                    -keyout "${KEY}" \
+                    -passout "env:PASSPHRASE" \
+                    -out "${CERT_REQ}" ||
+            die "error generating certificate request"
+
+    echo "Generating certificate..." >&2
+
+    PASSPHRASE="${CA_PASSPHRASE}" \
+        openssl ca -startdate "${START_DATE}" \
+                   -enddate "${END_DATE}" \
+                   -policy policy_anything \
+                   -md sha256 \
+                   -batch \
+                   -notext \
+                   -cert "${CA_CERT}" \
+                   -keyfile "${CA_KEY}" \
+                   -passin "env:PASSPHRASE" \
+                   -out "${CERT}" \
+                   -infiles "${CERT_REQ}" ||
+            die "error signing certificate"
+}
+
+check_mounted()
+{
+    local DIR="$1"
+
+    [ -d "${DIR}" ] || return 1
+
+    local ABSOLUTE_DIR=$(cd "${DIR}" && /bin/pwd -P)
+
+    local MOUNT_DIR
+    for MOUNT_DIR in $(cut -f2 -d' ' /proc/mounts) ; do
+        [ "${MOUNT_DIR}" = "${ABSOLUTE_DIR}" ] && return 0
+    done
+
+    return 1
+}
+
+read_ca_passphrase()
+{
+    echo "Enter passphrase for certificate authority private key."
+
+    read -p "Passphrase (echoed to screen): " CA_PASSPHRASE
+}
+
+read_signing_cert_passphrase()
+{
+    echo
+    echo "Enter new passphrase for signing certificate private key."
+
+    while true ; do
+        read -p "Passphrase (echoed to screen): " CERT_PASSPHRASE
+
+        local CERT_PASSPHRASE_VERIFY
+        read -p "Verify passphrase (echoed to screen): " CERT_PASSPHRASE_VERIFY
+
+        [ "${CERT_PASSPHRASE_VERIFY}" = "${CERT_PASSPHRASE}" ] && break
+
+        echo "Passphrases do not match. Please try again."
+    done
+}
+
+die()
+{
+    echo "$(basename $0): $*" >&2
+    exit 1
+}
+
+export OPENSSL_CONF="conf/openssl.cnf"
+
+parse_args "$@"
+
+generate_signing_cert
+
+exit 0
